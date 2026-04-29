@@ -1,0 +1,5 @@
+.gitignore
+.env
+debug_page.html
+*.xlsx
+__pycache__/
