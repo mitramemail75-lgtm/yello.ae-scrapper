@@ -412,12 +412,12 @@
         "columns": {
           "mappingMode": "defineBelow",
           "value": {
-            "Email": "={{ $('Filter Emails1').item.json.Email }}",
+            "Profile URL": "={{ $('Filter Emails1').item.json['Profile URL'] }}",
             "Outreach Status": "Sent",
             "Outreach Date": "={{ $now.toString() }}"
           },
           "matchingColumns": [
-            "Email"
+            "Profile URL"
           ]
         },
         "options": {}
