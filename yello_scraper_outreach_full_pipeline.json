@@ -150,7 +150,7 @@
     },
     {
       "parameters": {
-        "jsCode": "return $input.all().filter(item => item.json.Email && item.json.Email.includes('@'));"
+        "jsCode": "const ownEmails = ['kiwavix919@dwseal.com'];\n\nreturn $input.all().filter(item => {\n  const email = String(item.json.Email || '').trim().toLowerCase();\n\n  if (!email || !email.includes('@')) return false;\n  if (ownEmails.includes(email)) return false;\n  if (email.includes('*') || email.includes('public')) return false;\n\n  return /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email);\n});"
       },
       "id": "de3e5528-c241-468e-a1f8-2e47797d63a4",
       "name": "Filter Emails1",
