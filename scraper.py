@@ -3,6 +3,7 @@ import re
 import sys
 import argparse
 import os
+from urllib.parse import urljoin
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -126,23 +127,69 @@ def extract_company_id(profile_url):
     return match.group(1) if match else None
 
 
-def get_email(driver, company_id):
+def valid_lead_email(email):
+    return bool(email) and not is_own_email(email)
+
+
+def first_valid_email_from_html(html):
+    soup = BeautifulSoup(html, "html.parser")
+
+    for mailto in soup.select("a[href^='mailto:']"):
+        email = extract_email_text(mailto.get("href", ""))
+        if valid_lead_email(email):
+            return email
+
+    for match in EMAIL_RE.finditer(soup.get_text(" ", strip=True)):
+        email = match.group(0).strip()
+        if valid_lead_email(email):
+            return email
+
+    return ""
+
+
+def get_email(driver, company_id, profile_url):
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    wait = WebDriverWait(driver, 8)
+
+    if profile_url:
+        try:
+            driver.get(profile_url)
+            time.sleep(EMAIL_DELAY)
+
+            email = first_valid_email_from_html(driver.page_source)
+            if email:
+                return email
+
+            show_email_links = driver.find_elements(
+                By.XPATH,
+                "//a[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'show email')]"
+            )
+
+            if show_email_links:
+                href = show_email_links[0].get_attribute("href") or ""
+                if href:
+                    driver.get(urljoin(profile_url, href))
+                else:
+                    driver.execute_script("arguments[0].click();", show_email_links[0])
+
+                wait.until(lambda d: first_valid_email_from_html(d.page_source) or "sign-in" in d.current_url)
+                email = first_valid_email_from_html(driver.page_source)
+                if email:
+                    return email
+
+        except Exception as e:
+            print(f"  [profile email error] {e}")
+
     try:
-        driver.get(f"https://www.yello.ae/getlogin/email:{company_id}")
+        driver.get(f"https://www.yello.ae/sign-in/email:{company_id}")
         time.sleep(EMAIL_DELAY)
 
-        soup      = BeautifulSoup(driver.page_source, "html.parser")
-        email_tag = soup.select_one("div.login_message h3, a[href^='mailto:']")
-
-        if email_tag:
-            email = extract_email_text(email_tag.get("href", "") or email_tag.get_text(" ", strip=True))
-            if email and not is_own_email(email):
-                return email
-
-        for match in EMAIL_RE.finditer(soup.get_text(" ", strip=True)):
-            email = match.group(0).strip()
-            if not is_own_email(email):
-                return email
+        email = first_valid_email_from_html(driver.page_source)
+        if email:
+            return email
 
     except Exception as e:
         print(f"  [email error] {e}")
@@ -340,7 +387,7 @@ def scrape():
                 not_found += 1
                 continue
 
-            email = get_email(driver, company_id)
+            email = get_email(driver, company_id, record["Profile URL"])
             record["Email"] = email
 
             if email:
