@@ -10,14 +10,20 @@ import pandas as pd
 
 load_dotenv()
 
-YELLO_EMAIL    = os.getenv("YELLO_EMAIL", "")
-YELLO_PASSWORD = os.getenv("YELLO_PASSWORD", "")
-DELAY          = 2
-EMAIL_DELAY    = 1.5
+YELLO_EMAIL     = os.getenv("YELLO_EMAIL", "")
+YELLO_PASSWORD  = os.getenv("YELLO_PASSWORD", "")
+BLOCKED_EMAILS  = os.getenv("BLOCKED_EMAILS", "")
+DELAY           = 2
+EMAIL_DELAY     = 1.5
 
 IS_CI = os.getenv("CI") == "true"  # GitHub Actions sets this automatically
 
-OWN_EMAILS = {email.lower().strip() for email in [YELLO_EMAIL] if email.strip()}
+OWN_EMAILS = {
+    email.lower().strip()
+    for email in [YELLO_EMAIL, *BLOCKED_EMAILS.split(",")]
+    if email.strip()
+}
+OWN_EMAIL_LOCAL_PARTS = {email.split("@", 1)[0] for email in OWN_EMAILS if "@" in email}
 EMAIL_RE = re.compile(r'[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}')
 PHONE_RE = re.compile(
     r'(?:\+?\s*971|00971|0)?[\s().-]*(?:[2-9]|5[024-689])[\s().-]*\d(?:[\s().-]*\d){5,8}'
@@ -128,21 +134,39 @@ def extract_company_id(profile_url):
 
 
 def valid_lead_email(email):
+    email = clean_email(email)
     return bool(email) and not is_own_email(email)
 
 
-def first_valid_email_from_html(html):
+def clean_email(email):
+    email = clean_excel_string(email or "")
+    email = re.sub(r'\s+', '', email)
+    return email.strip(" .,;:'\"<>[]()").lower()
+
+
+def first_valid_email_from_text(text):
+    for match in EMAIL_RE.finditer(clean_excel_string(text or "")):
+        email = clean_email(match.group(0))
+        if valid_lead_email(email):
+            return email
+    return ""
+
+
+def first_valid_email_from_html(html, selectors=None, fallback_to_page=True):
     soup = BeautifulSoup(html, "html.parser")
+    selectors = selectors or []
 
-    for mailto in soup.select("a[href^='mailto:']"):
-        email = extract_email_text(mailto.get("href", ""))
-        if valid_lead_email(email):
-            return email
+    for selector in selectors:
+        for element in soup.select(selector):
+            email = first_valid_email_from_text(" ".join([
+                element.get("href", ""),
+                element.get_text(" ", strip=True),
+            ]))
+            if email:
+                return email
 
-    for match in EMAIL_RE.finditer(soup.get_text(" ", strip=True)):
-        email = match.group(0).strip()
-        if valid_lead_email(email):
-            return email
+    if fallback_to_page:
+        return first_valid_email_from_text(soup.get_text(" ", strip=True))
 
     return ""
 
@@ -150,7 +174,6 @@ def first_valid_email_from_html(html):
 def get_email(driver, company_id, profile_url):
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
-    from selenium.webdriver.support import expected_conditions as EC
 
     wait = WebDriverWait(driver, 8)
 
@@ -158,10 +181,6 @@ def get_email(driver, company_id, profile_url):
         try:
             driver.get(profile_url)
             time.sleep(EMAIL_DELAY)
-
-            email = first_valid_email_from_html(driver.page_source)
-            if email:
-                return email
 
             show_email_links = driver.find_elements(
                 By.XPATH,
@@ -175,8 +194,16 @@ def get_email(driver, company_id, profile_url):
                 else:
                     driver.execute_script("arguments[0].click();", show_email_links[0])
 
-                wait.until(lambda d: first_valid_email_from_html(d.page_source) or "sign-in" in d.current_url)
-                email = first_valid_email_from_html(driver.page_source)
+                wait.until(lambda d: first_valid_email_from_html(
+                    d.page_source,
+                    ["div.login_message", ".login_message", "a[href^='mailto:']"],
+                    fallback_to_page=False,
+                ) or "sign-in" in d.current_url)
+                email = first_valid_email_from_html(
+                    driver.page_source,
+                    ["div.login_message", ".login_message", "a[href^='mailto:']"],
+                    fallback_to_page=False,
+                )
                 if email:
                     return email
 
@@ -187,7 +214,11 @@ def get_email(driver, company_id, profile_url):
         driver.get(f"https://www.yello.ae/sign-in/email:{company_id}")
         time.sleep(EMAIL_DELAY)
 
-        email = first_valid_email_from_html(driver.page_source)
+        email = first_valid_email_from_html(
+            driver.page_source,
+            ["div.login_message", ".login_message", "a[href^='mailto:']"],
+            fallback_to_page=False,
+        )
         if email:
             return email
 
@@ -198,12 +229,13 @@ def get_email(driver, company_id, profile_url):
 
 
 def is_own_email(email):
-    return email.lower().strip() in OWN_EMAILS
+    email = clean_email(email)
+    local_part = email.split("@", 1)[0] if "@" in email else ""
+    return email in OWN_EMAILS or local_part in OWN_EMAIL_LOCAL_PARTS
 
 
 def extract_email_text(text):
-    match = EMAIL_RE.search(text or "")
-    return match.group(0).strip() if match else ""
+    return first_valid_email_from_text(text)
 
 
 def normalize_phone(text):
