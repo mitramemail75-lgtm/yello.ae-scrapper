@@ -173,9 +173,25 @@ def first_valid_email_from_html(html, selectors=None, fallback_to_page=True):
 
 def get_email(driver, company_id, profile_url):
     from selenium.webdriver.common.by import By
-    from selenium.webdriver.support.ui import WebDriverWait
 
-    wait = WebDriverWait(driver, 8)
+    for email_url in [
+        f"https://www.yello.ae/getlogin/email:{company_id}",
+        f"https://www.yello.ae/sign-in/email:{company_id}",
+    ]:
+        try:
+            driver.get(email_url)
+            time.sleep(EMAIL_DELAY)
+
+            email = first_valid_email_from_html(
+                driver.page_source,
+                ["div.login_message", ".login_message", "h3", "a[href^='mailto:']"],
+                fallback_to_page=True,
+            )
+            if email:
+                return email
+
+        except Exception as e:
+            print(f"  [email endpoint error] {e}")
 
     if profile_url:
         try:
@@ -194,36 +210,17 @@ def get_email(driver, company_id, profile_url):
                 else:
                     driver.execute_script("arguments[0].click();", show_email_links[0])
 
-                wait.until(lambda d: first_valid_email_from_html(
-                    d.page_source,
-                    ["div.login_message", ".login_message", "a[href^='mailto:']"],
-                    fallback_to_page=False,
-                ) or "sign-in" in d.current_url)
+                time.sleep(EMAIL_DELAY)
                 email = first_valid_email_from_html(
                     driver.page_source,
-                    ["div.login_message", ".login_message", "a[href^='mailto:']"],
-                    fallback_to_page=False,
+                    ["div.login_message", ".login_message", "h3", "a[href^='mailto:']"],
+                    fallback_to_page=True,
                 )
                 if email:
                     return email
 
         except Exception as e:
             print(f"  [profile email error] {e}")
-
-    try:
-        driver.get(f"https://www.yello.ae/sign-in/email:{company_id}")
-        time.sleep(EMAIL_DELAY)
-
-        email = first_valid_email_from_html(
-            driver.page_source,
-            ["div.login_message", ".login_message", "a[href^='mailto:']"],
-            fallback_to_page=False,
-        )
-        if email:
-            return email
-
-    except Exception as e:
-        print(f"  [email error] {e}")
 
     return ""
 
