@@ -10,9 +10,17 @@ import pandas as pd
 
 load_dotenv()
 
-YELLO_EMAIL     = os.getenv("YELLO_EMAIL", "")
-YELLO_PASSWORD  = os.getenv("YELLO_PASSWORD", "")
-BLOCKED_EMAILS  = os.getenv("BLOCKED_EMAILS", "")
+def env_value(name, default=""):
+    value = os.getenv(name, default).strip()
+    if " #" in value:
+        value = value.split(" #", 1)[0].strip()
+    return value.strip("'\"")
+
+
+YELLO_EMAIL     = env_value("YELLO_EMAIL")
+YELLO_PASSWORD  = env_value("YELLO_PASSWORD")
+BLOCKED_EMAILS  = env_value("BLOCKED_EMAILS")
+DEBUG_EMAILS    = env_value("DEBUG_EMAILS", "0") == "1"
 DELAY           = 2
 EMAIL_DELAY     = 1.5
 
@@ -61,6 +69,14 @@ def create_driver():
         return uc.Chrome(options=options, version_main=147)
 
 
+def masked_email(email):
+    email = clean_email(email)
+    if "@" not in email:
+        return "<invalid email>"
+    local, domain = email.split("@", 1)
+    return f"{local[:2]}***@{domain}"
+
+
 def login(driver, wait):
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support import expected_conditions as EC
@@ -68,6 +84,10 @@ def login(driver, wait):
     print("\n[Login] Navigating to Yello.ae...")
     driver.get("https://www.yello.ae/sign-in")
     time.sleep(4)
+
+    if "sign-in" not in driver.current_url:
+        print("[Login] Already signed in.")
+        return True
 
     try:
         email_field = wait.until(EC.presence_of_element_located(
@@ -92,12 +112,34 @@ def login(driver, wait):
         else:
             soup  = BeautifulSoup(driver.page_source, "html.parser")
             error = soup.select_one("div.error, p.error, span.error")
+            save_login_debug(driver)
             print(f"[Login] ❌ Failed: {error.get_text() if error else 'Check credentials in .env'}")
+            page_text = soup.get_text(" ", strip=True).lower()
+            if "captcha" in page_text or "robot" in page_text:
+                print("[Login] Yello appears to be showing a CAPTCHA/bot check.")
+            print(f"[Login] URL: {driver.current_url}")
+            print(f"[Login] Title: {driver.title[:120]}")
+            print("[Login] Saved debug_login.html and login_failed.png")
             return False
 
     except Exception as e:
+        save_login_debug(driver)
         print(f"[Login] ❌ Error: {e}")
+        print("[Login] Saved debug_login.html and login_failed.png")
         return False
+
+
+def save_login_debug(driver):
+    try:
+        with open("debug_login.html", "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+    except Exception:
+        pass
+
+    try:
+        driver.save_screenshot("login_failed.png")
+    except Exception:
+        pass
 
 
 def build_url(keyword, location, page=1):
@@ -152,6 +194,39 @@ def first_valid_email_from_text(text):
     return ""
 
 
+def all_email_candidates(text):
+    candidates = []
+    for match in EMAIL_RE.finditer(clean_excel_string(text or "")):
+        email = clean_email(match.group(0))
+        if email and email not in candidates:
+            candidates.append(email)
+    return candidates
+
+
+def mask_email(email):
+    email = clean_email(email)
+    if "@" not in email:
+        return email
+    local, domain = email.split("@", 1)
+    if is_own_email(email):
+        return f"{local[:2]}***@{domain}"
+    return email
+
+
+def debug_email_page(driver, label, html):
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(" ", strip=True)
+    candidates = [mask_email(email) for email in all_email_candidates(text)]
+    login_message = soup.select_one("div.login_message, .login_message")
+    login_text = login_message.get_text(" ", strip=True)[:160] if login_message else ""
+
+    print(f"  [email debug] {label} url={driver.current_url}")
+    print(f"  [email debug] title={driver.title[:120]}")
+    print(f"  [email debug] candidates={candidates[:5]}")
+    if login_text:
+        print(f"  [email debug] login_message={login_text}")
+
+
 def first_valid_email_from_html(html, selectors=None, fallback_to_page=True):
     soup = BeautifulSoup(html, "html.parser")
     selectors = selectors or []
@@ -171,32 +246,44 @@ def first_valid_email_from_html(html, selectors=None, fallback_to_page=True):
     return ""
 
 
-def get_email(driver, company_id, profile_url):
+def yello_revealed_email(html):
+    soup = BeautifulSoup(html, "html.parser")
+
+    for element in soup.select("div.login_message h3, .login_message h3"):
+        email = first_valid_email_from_text(element.get_text(" ", strip=True))
+        if email:
+            return email
+
+    for element in soup.select("div.login_message, .login_message"):
+        email = first_valid_email_from_text(element.get_text(" ", strip=True))
+        if email:
+            return email
+
+    return first_valid_email_from_html(
+        html,
+        ["h3", "a[href^='mailto:']"],
+        fallback_to_page=True,
+    )
+
+
+def get_email(driver, company_id, profile_url, debug=False):
     from selenium.webdriver.common.by import By
-
-    for email_url in [
-        f"https://www.yello.ae/getlogin/email:{company_id}",
-        f"https://www.yello.ae/sign-in/email:{company_id}",
-    ]:
-        try:
-            driver.get(email_url)
-            time.sleep(EMAIL_DELAY)
-
-            email = first_valid_email_from_html(
-                driver.page_source,
-                ["div.login_message", ".login_message", "h3", "a[href^='mailto:']"],
-                fallback_to_page=True,
-            )
-            if email:
-                return email
-
-        except Exception as e:
-            print(f"  [email endpoint error] {e}")
 
     if profile_url:
         try:
             driver.get(profile_url)
             time.sleep(EMAIL_DELAY)
+
+            if DEBUG_EMAILS and debug:
+                debug_email_page(driver, "profile", driver.page_source)
+
+            email = first_valid_email_from_html(
+                driver.page_source,
+                ["a[href^='mailto:']", "div.company_details", ".company_details", ".text"],
+                fallback_to_page=True,
+            )
+            if email:
+                return email
 
             show_email_links = driver.find_elements(
                 By.XPATH,
@@ -211,11 +298,11 @@ def get_email(driver, company_id, profile_url):
                     driver.execute_script("arguments[0].click();", show_email_links[0])
 
                 time.sleep(EMAIL_DELAY)
-                email = first_valid_email_from_html(
-                    driver.page_source,
-                    ["div.login_message", ".login_message", "h3", "a[href^='mailto:']"],
-                    fallback_to_page=True,
-                )
+
+                if DEBUG_EMAILS and debug:
+                    debug_email_page(driver, "profile show email", driver.page_source)
+
+                email = yello_revealed_email(driver.page_source)
                 if email:
                     return email
 
@@ -338,6 +425,11 @@ def scrape():
         LOCATION = input("Enter location (e.g. Dubai, Abu Dhabi, Sharjah)  : ").strip()
 
     print(f"\n[Mode] {'GitHub Actions (CI)' if IS_CI else 'Local Windows'}")
+    print(f"[Config] YELLO_EMAIL={masked_email(YELLO_EMAIL)}")
+
+    if not YELLO_EMAIL or not YELLO_PASSWORD or "@" not in YELLO_EMAIL:
+        print("\n❌ Missing or invalid Yello credentials. Check YELLO_EMAIL and YELLO_PASSWORD in .env / secrets.")
+        sys.exit(1)
 
     driver = create_driver()
     wait   = WebDriverWait(driver, 20)
@@ -416,7 +508,7 @@ def scrape():
                 not_found += 1
                 continue
 
-            email = get_email(driver, company_id, record["Profile URL"])
+            email = get_email(driver, company_id, record["Profile URL"], debug=i < 3)
             record["Email"] = email
 
             if email:
